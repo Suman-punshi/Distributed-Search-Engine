@@ -92,4 +92,4 @@ for i in range(NUM_SHARDS):
     faiss.write_index(index, os.path.join(INDEX_DIR, f'shard_{i}.index'))
     np.save(os.path.join(INDEX_DIR, f'shard_{i}_ids.npy'), shard_ids)
 
-print(f"✅ Indexed {len(features)} book covers into {NUM_SHARDS} FAISS shards.")
+print(f"Indexed {len(features)} book covers into {NUM_SHARDS} FAISS shards.")
