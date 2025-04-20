@@ -6,3 +6,4 @@ Pillow>=9.5.0
 scikit-learn>=1.2.2
 tqdm>=4.65.0
 pinecone>=3.0.0
+Flask==2.3.3

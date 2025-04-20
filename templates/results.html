@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Search Results</title>
+</head>
+<body>
+  <h1>Top Matching Books</h1>
+  {% for book in results %}
+    <div>
+      <p><strong>Book ID:</strong> {{ book.book_id }}</p>
+      <p><strong>Similarity:</strong> {{ book.similarity }}</p>
+      <p><strong>Metadata:</strong> {{ book.meta }}</p>
+      <hr>
+    </div>
+  {% endfor %}
+  <a href="/">Back</a>
+</body>
+</html>
