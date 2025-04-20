@@ -1,26 +1,24 @@
 import os
-import faiss
 import numpy as np
 import pandas as pd
-from multiprocessing.pool import ThreadPool
-from sklearn.preprocessing import normalize
 import tensorflow_hub as hub
 import tensorflow as tf
-from PIL import Image
-import cv2
-import json
+from PIL import Image, ImageOps
+from sklearn.preprocessing import normalize
+from pinecone import Pinecone
+from tqdm import tqdm
 
 # ========== CONFIG ==========
-NUM_SHARDS = 4
-FEATURE_DIR = 'features'      # Folder to save .npy features
-INDEX_DIR = 'faiss_indexes'   # Folder to save FAISS indexes
-BOOK_CSV = 'books.csv'        # Your full books.csv file
-IMG_BASE_PATH = '.'           # Root dir for book images
+FEATURE_DIR = 'features'
+BOOK_CSV = 'main_dataset.csv'
+IMG_BASE_PATH = '.'
 MODULE_URL = "https://tfhub.dev/google/delf/1"
+PINECONE_API_KEY = "pcsk_zhkLX_3ofVYvUgWWFeGhEjdftpy3wWj3wCbv6EmYhm2EEKNMVft31uycr1ZfR31LsJdV2"  # Replace with your Pinecone API key
+PINECONE_ENV = "us-west1-gcp"      # Replace with your Pinecone environment
+INDEX_NAME = "book-search-engine"
 # ============================
 
 os.makedirs(FEATURE_DIR, exist_ok=True)
-os.makedirs(INDEX_DIR, exist_ok=True)
 
 # Load DELF model
 print("Loading DELF model from TF Hub...")
@@ -28,39 +26,56 @@ delf_model = hub.load(MODULE_URL).signatures['default']
 
 # Load book metadata
 df = pd.read_csv(BOOK_CSV)
-df = df.reset_index().rename(columns={"index": "book_id"})  # Add book_id column
-
-# Save metadata for later lookup
+df = df.reset_index().rename(columns={"index": "book_id"})
 df.to_json('book_metadata.json', orient='records', lines=True)
 id_to_meta = {row['book_id']: row for _, row in df.iterrows()}
 
 # ========== FEATURE EXTRACTOR ==========
 def extract_feature(image_path):
     try:
-        img = Image.open(image_path).convert('RGB')
-        img = img.resize((320, 320))  # Resize for consistency
-        img_np = np.array(img) / 255.0
-        img_tensor = tf.convert_to_tensor(img_np, dtype=tf.float32)
-        img_tensor = tf.expand_dims(img_tensor, axis=0)
-
-        result = delf_model(img_tensor)
+        img = Image.open(image_path)
+        img = img.convert('RGB')
+        img = ImageOps.fit(img, (320, 320), Image.LANCZOS)
+        img = img.resize((320, 320))
+        np_image = np.array(img)
+        float_image = tf.image.convert_image_dtype(np_image, tf.float32)
+        
+        result = delf_model(
+            image=float_image,
+            score_threshold=tf.constant(50.0),
+            image_scales=tf.constant([0.25, 0.3536, 0.5, 0.7071, 1.0, 1.4142, 2.0]),
+            max_feature_num=tf.constant(1000)
+        )
+        
         features = result['descriptors'].numpy()
 
-        # Use mean-pooled descriptor as image vector (simplified)
+        # Edge case: No descriptors returned
+        if features.size == 0:
+            print(f"No descriptors found in {image_path}")
+            return None
+
         pooled = np.mean(features, axis=0)
+
+        # Handle NaNs before normalizing
+        if np.isnan(pooled).any():
+            print(f"NaN values found in pooled descriptor of {image_path}")
+            return None
+
         pooled = normalize(pooled.reshape(1, -1)).astype('float32')
         return pooled
+
     except Exception as e:
         print(f"Error extracting feature from {image_path}: {e}")
         return None
-# ========================================
+
+    
 
 # ========== STEP 1: Extract Features ==========
 print("Extracting and saving features...")
 features = []
 book_ids = []
 
-for i, row in df.iterrows():
+for i, row in tqdm(df.iterrows()):
     img_path = row['img_paths']
     full_img_path = os.path.join(IMG_BASE_PATH, img_path)
     vec = extract_feature(full_img_path)
@@ -74,22 +89,31 @@ book_ids = np.array(book_ids)
 np.save(os.path.join(FEATURE_DIR, 'features.npy'), features)
 np.save(os.path.join(FEATURE_DIR, 'book_ids.npy'), book_ids)
 
-# ========== STEP 2: Create Pseudo-Distributed Index ==========
-print("Creating FAISS shards...")
-features = np.load(os.path.join(FEATURE_DIR, 'features.npy'))
-book_ids = np.load(os.path.join(FEATURE_DIR, 'book_ids.npy'))
+# ========== STEP 2: Upload to Pinecone ==========
+print("Initializing Pinecone...")
+pc = Pinecone(api_key=PINECONE_API_KEY)
 
-shard_size = len(features) // NUM_SHARDS
-for i in range(NUM_SHARDS):
-    start = i * shard_size
-    end = None if i == NUM_SHARDS - 1 else (i + 1) * shard_size
-    shard_feats = features[start:end]
-    shard_ids = book_ids[start:end]
+index = pc.Index(INDEX_NAME)
 
-    index = faiss.IndexFlatL2(shard_feats.shape[1])
-    index.add(shard_feats)
+print("Uploading vectors to Pinecone...")
+vectors_to_upsert = []
+for i, vec in enumerate(features):
+    meta = id_to_meta.get(int(book_ids[i]), {})
+    meta_dict = meta.to_dict() if isinstance(meta, pd.Series) else meta
+    pinecone_id = str(book_ids[i])
+    print(vec.shape)         # Should be (128,)
+    print(len(vec.tolist())) # Should be 128
+    print(f"Upserting: ID={pinecone_id}, Vector Dim={len(vec)}, Meta Keys={list(meta_dict.keys())}")
 
-    faiss.write_index(index, os.path.join(INDEX_DIR, f'shard_{i}.index'))
-    np.save(os.path.join(INDEX_DIR, f'shard_{i}_ids.npy'), shard_ids)
+    vectors_to_upsert.append((pinecone_id, vec.tolist(), meta_dict))
 
-print(f"Indexed {len(features)} book covers into {NUM_SHARDS} FAISS shards.")
+batch_size = 100
+for i in range(0, len(vectors_to_upsert), batch_size):
+    batch = vectors_to_upsert[i:i+batch_size]
+    index.upsert(vectors=batch)
+
+print(f"Uploaded {len(vectors_to_upsert)} vectors to Pinecone.")
+
+
+response = index.fetch(ids=["0"])
+print(response)
