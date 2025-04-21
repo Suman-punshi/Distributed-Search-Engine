@@ -10,8 +10,12 @@ import cv2
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+import time
 
-import os
+from logger_setup import setup_logger
+
+log = setup_logger('extractor', 'logs/extractor.log')
+
 
 # Config
 MODULE_PATH = "./models/delf/1"
@@ -36,31 +40,37 @@ def detect_cover(image):
 
 @app.route("/extract", methods=["POST"])
 def extract_feature():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
+    try:
+        start_total = time.time()
+        log.info("Received image for feature extraction")
 
-    image = Image.open(request.files['image'].stream).convert("RGB")
-    image = detect_cover(image)
+        t1 = time.time()
+        image = Image.open(request.files['image'].stream).convert("RGB")
+        image = ImageOps.fit(image, (320, 320), Image.LANCZOS)
+        np_image = np.array(image)
+        float_image = tf.image.convert_image_dtype(np_image, tf.float32)
+        log.info(f"[Preprocessing] took {time.time() - t1:.4f}s")
 
+        t2 = time.time()
+        result = delf_model(
+            image=float_image,
+            score_threshold=tf.constant(50.0),
+            image_scales=tf.constant([0.25, 0.3536, 0.5, 0.7071, 1.0, 1.4142, 2.0]),
+            max_feature_num=tf.constant(1000)
+        )
+        log.info(f"[Feature Extraction] took {time.time() - t2:.4f}s")
 
-    np_image = np.array(image)
-    float_image = tf.image.convert_image_dtype(np_image, tf.float32)
+        t3 = time.time()
+        features = result['descriptors'].numpy()
+        pooled = np.mean(features, axis=0)
+        pooled = normalize(pooled.reshape(1, -1)).astype('float32')
+        log.info(f"[Vector Normalization] took {time.time() - t3:.4f}s")
 
-    result = delf_model(
-        image=float_image,
-        score_threshold=tf.constant(50.0),
-        image_scales=tf.constant([0.25, 0.3536, 0.5, 0.7071, 1.0, 1.4142, 2.0]),
-        max_feature_num=tf.constant(1000)
-    )
-
-    features = result['descriptors'].numpy()
-    if features.size == 0:
-        return jsonify({"error": "No descriptors found"}), 500
-
-    pooled = np.mean(features, axis=0)
-    pooled = normalize(pooled.reshape(1, -1)).astype('float32')
-
-    return jsonify({"vector": pooled.flatten().tolist()}), 200
-
+        log.info(f"[Total Extraction Time] {time.time() - start_total:.4f}s")
+        return jsonify({"vector": pooled.flatten().tolist()}), 200
+    except Exception as e:
+        log.error(f"Error during extraction: {e}")
+        return jsonify({"error": str(e)}), 500
+    
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001)
