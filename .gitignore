@@ -1,4 +1,5 @@
 .venv
 __pycache__/
 pdc_proj/
-test_images/
+test_images/*
+frontend/static/dataset/*
