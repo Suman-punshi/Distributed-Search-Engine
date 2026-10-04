@@ -6,3 +6,6 @@ __pycache__/
 .venv
 test_images/
 **/wheels/
+.env
+.env.*
+!.env.example

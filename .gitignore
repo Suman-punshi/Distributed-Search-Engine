@@ -3,3 +3,6 @@ __pycache__/
 pdc_proj/
 test_images/*
 frontend/static/dataset/*
+.env
+.env.*
+!.env.example

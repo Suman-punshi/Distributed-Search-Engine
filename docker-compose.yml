@@ -15,5 +15,7 @@ services:
 
   searcher:
     build: ./searcher
+    environment:
+      PINECONE_API_KEY: "${PINECONE_API_KEY:?Set PINECONE_API_KEY to a new Pinecone API key}"
     ports:
       - "5002:5002"
